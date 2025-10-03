@@ -56,17 +56,27 @@ class ViLCap(nn.Module):
             depth=config.encoder_depth,
             output_shape=None,  # No classification head
             mode=None,  # Feature extraction mode
-            pooling=config.encoder_pooling,
+            pooling=None,  # Must be None in feature extraction mode
             drop_path_rate=config.encoder_drop_path_rate,
         )
+
+        # Store pooling config for manual pooling after encoder
+        self.encoder_pooling = config.encoder_pooling
 
         # Load pretrained weights if provided
         if config.encoder_pretrained_path is not None:
             self.load_encoder_weights(config.encoder_pretrained_path)
 
+        # Determine visual dimension based on pooling
+        if self.encoder_pooling == "bilateral_avg" or self.encoder_pooling == "bilateral_concat":
+            visual_dim = config.encoder_dim if self.encoder_pooling == "bilateral_avg" else config.encoder_dim * 2
+        else:
+            # No pooling - will be (B, N, D) where N = num_patches
+            visual_dim = config.encoder_dim
+
         # Fusion module (projects visual features to decoder space)
         self.fusion = SimpleFusion(
-            visual_dim=config.encoder_dim,
+            visual_dim=visual_dim,
             decoder_dim=config.decoder_dim
         )
 
@@ -127,9 +137,24 @@ class ViLCap(nn.Module):
             images: (batch_size, 3, H, W)
 
         Returns:
-            visual_features: (batch_size, encoder_dim)
+            visual_features: (batch_size, encoder_dim) or (batch_size, N, encoder_dim)
         """
-        return self.encoder(images)
+        # Encoder returns (B, N, D) where N = num_patches
+        features = self.encoder(images)
+
+        # Apply pooling if specified
+        if self.encoder_pooling == "bilateral_avg":
+            # Average of first and last token
+            features = (features[:, 0] + features[:, -1]) / 2  # (B, D)
+        elif self.encoder_pooling == "bilateral_concat":
+            # Concatenate first and last token
+            features = torch.cat([features[:, 0], features[:, -1]], dim=-1)  # (B, 2*D)
+        elif self.encoder_pooling == "mean":
+            # Mean pool all tokens
+            features = features.mean(dim=1)  # (B, D)
+        # else: no pooling, return (B, N, D)
+
+        return features
 
     def forward(self, images, captions=None, mode='train'):
         """
