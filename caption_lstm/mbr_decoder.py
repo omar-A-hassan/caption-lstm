@@ -113,15 +113,24 @@ class MBRCaptionDecoder:
             source_text = [""] * batch_size
 
         # Encode images once
-        visual_features = self.model.encode_image(images)  # (B, D_enc)
-        visual_context = self.model.fusion(visual_features)  # (B, D_dec)
+        visual_features = self.model.encode_image(images)  # (B, D_enc) or (B, N, D_enc)
+        visual_context = self.model.fusion(visual_features)  # (B, D_dec) or (B, N, D_dec)
 
         # Generate candidates and perform MBR for each image
         selected_captions = []
 
         for b in range(batch_size):
+            # Get visual context for this image
+            visual_ctx_single = visual_context[b:b+1]  # (1, D) or (1, N, D)
+
             # Expand visual context for N candidates
-            visual_ctx_batch = visual_context[b:b+1].expand(self.num_candidates, -1)
+            # Handle both 2D (B, D) and 3D (B, N, D) cases
+            if visual_ctx_single.dim() == 2:
+                # (1, D) -> (num_candidates, D)
+                visual_ctx_batch = visual_ctx_single.expand(self.num_candidates, -1)
+            else:
+                # (1, N, D) -> (num_candidates, N, D)
+                visual_ctx_batch = visual_ctx_single.expand(self.num_candidates, -1, -1)
 
             # Generate N candidates via sampling
             generated_ids = self.model.decoder.generate(
