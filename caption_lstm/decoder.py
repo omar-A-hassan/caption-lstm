@@ -67,6 +67,9 @@ class CaptionDecoder(nn.Module):
         # Output projection to vocabulary
         self.output_proj = nn.Linear(config.embedding_dim, config.vocab_size)
 
+        # Lazy-initialized projection for visual context when dims mismatch
+        self._visual_proj = None
+
         self.reset_parameters()
 
     def forward(self, token_ids, visual_context=None):
@@ -75,8 +78,10 @@ class CaptionDecoder(nn.Module):
 
         Args:
             token_ids: Token IDs (batch_size, seq_len)
-            visual_context: Visual features to inject (batch_size, embedding_dim)
-                          If provided, will be added to first token embedding
+            visual_context:
+                - (batch_size, embedding_dim) OR
+                - (batch_size, N, embedding_dim)  # will be mean-pooled to (B, D)
+              If provided, it is added to the first token embedding.
 
         Returns:
             logits: (batch_size, seq_len, vocab_size)
@@ -89,9 +94,26 @@ class CaptionDecoder(nn.Module):
         # Add positional embedding
         x = x + self.pos_embedding[:, :seq_len, :]
 
-        # Inject visual context into first token (simple fusion)
+        # Inject visual context into first token (robust to different shapes)
         if visual_context is not None:
-            # visual_context: (B, D)
+            # Accept either (B, D_enc) or (B, N, D_enc)
+            if visual_context.dim() == 3:
+                # Mean-pool tokens -> (B, D_enc)
+                visual_context = visual_context.mean(dim=1)
+
+            # Now visual_context is (B, D_enc)
+            dec_d = x.size(-1)
+            enc_d = visual_context.size(-1)
+
+            # Project encoder dim to decoder dim if needed (lazy-create once)
+            if enc_d != dec_d:
+                if (self._visual_proj is None or
+                    self._visual_proj.in_features != enc_d or
+                    self._visual_proj.out_features != dec_d):
+                    self._visual_proj = nn.Linear(enc_d, dec_d).to(visual_context.device)
+                visual_context = self._visual_proj(visual_context)
+
+            # Add the visual context to the first token
             x[:, 0, :] = x[:, 0, :] + visual_context
 
         # Pass through mLSTM blocks
@@ -113,7 +135,9 @@ class CaptionDecoder(nn.Module):
             bos_token_id: Beginning of sequence token ID
             eos_token_id: End of sequence token ID
             pad_token_id: Padding token ID
-            visual_context: Visual features (batch_size, embedding_dim)
+            visual_context:
+                - (batch_size, embedding_dim) OR
+                - (batch_size, N, embedding_dim)  # will be mean-pooled internally
             max_length: Maximum generation length
             temperature: Sampling temperature
             top_k: Top-k sampling parameter
