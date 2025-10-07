@@ -81,7 +81,7 @@ class CaptionDecoder(nn.Module):
             visual_context:
                 - (batch_size, embedding_dim) OR
                 - (batch_size, N, embedding_dim)  # will be mean-pooled to (B, D)
-              If provided, it is added to the first token embedding.
+              If provided, it is added to ALL token embeddings at every timestep.
 
         Returns:
             logits: (batch_size, seq_len, vocab_size)
@@ -94,7 +94,7 @@ class CaptionDecoder(nn.Module):
         # Add positional embedding
         x = x + self.pos_embedding[:, :seq_len, :]
 
-        # Inject visual context into first token (robust to different shapes)
+        # Inject visual context at ALL timesteps (matching BiLSTM paper approach)
         if visual_context is not None:
             # Accept either (B, D_enc) or (B, N, D_enc)
             if visual_context.dim() == 3:
@@ -113,8 +113,10 @@ class CaptionDecoder(nn.Module):
                     self._visual_proj = nn.Linear(enc_d, dec_d).to(visual_context.device)
                 visual_context = self._visual_proj(visual_context)
 
-            # Add the visual context to the first token
-            x[:, 0, :] = x[:, 0, :] + visual_context
+            # Broadcast visual context to all timesteps and add
+            # visual_context: (B, D) -> (B, 1, D) -> (B, S, D)
+            visual_broadcast = visual_context.unsqueeze(1).expand(-1, seq_len, -1)
+            x = x + visual_broadcast
 
         # Pass through mLSTM blocks
         for i, (block, dropout) in enumerate(zip(self.blocks, self.dropout_layers)):
