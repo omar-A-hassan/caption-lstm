@@ -14,18 +14,23 @@ class CaptionTokenizer:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.max_length = max_length
 
-        # Add special tokens if not present
-        special_tokens = {'pad_token': '[PAD]', 'bos_token': '[BOS]', 'eos_token': '[EOS]'}
+        # Add EOS token for proper sequence termination
+        # Note: BERT already has [PAD], [CLS], [SEP], [UNK], [MASK]
+        # We add [EOS] specifically for generation stopping criterion
+        special_tokens = {'eos_token': '[EOS]'}
         num_added = self.tokenizer.add_special_tokens(special_tokens)
 
+        # Use BERT's CLS as our BOS (beginning of sequence) token
+        # This is semantically reasonable: CLS marks "start of classification input"
+        # which is similar to "start of generation output"
+        self.bos_token_id = self.tokenizer.cls_token_id
         self.pad_token_id = self.tokenizer.pad_token_id
-        self.bos_token_id = self.tokenizer.convert_tokens_to_ids('[BOS]')
-        self.eos_token_id = self.tokenizer.convert_tokens_to_ids('[EOS]')
+        self.eos_token_id = self.tokenizer.eos_token_id
         self.vocab_size = len(self.tokenizer)
 
     def encode(self, captions, device=None):
         """
-        Encode captions to token IDs.
+        Encode captions to token IDs with proper EOS token.
 
         Args:
             captions: List of caption strings
@@ -33,12 +38,24 @@ class CaptionTokenizer:
 
         Returns:
             dict with 'input_ids' and 'attention_mask'
+
+        Note:
+            BERT tokenizer by default adds [CLS] at start and [SEP] at end.
+            We disable default special tokens and manually add our [EOS] token
+            to ensure proper sequence termination during generation.
         """
+        # Manually append EOS token to each caption
+        # This ensures captions end with [EOS] instead of BERT's default [SEP]
+        captions_with_eos = [f"{cap} [EOS]" for cap in captions]
+
+        # Encode WITHOUT automatic special token addition
+        # This prevents BERT from adding [CLS] and [SEP]
         encoded = self.tokenizer(
-            captions,
+            captions_with_eos,
             padding='max_length',
             truncation=True,
             max_length=self.max_length,
+            add_special_tokens=False,  # Don't add [CLS] and [SEP]
             return_tensors='pt'
         )
 
