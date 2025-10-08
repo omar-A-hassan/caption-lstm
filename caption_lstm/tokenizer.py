@@ -44,20 +44,42 @@ class CaptionTokenizer:
             We disable default special tokens and manually add our [EOS] token
             to ensure proper sequence termination during generation.
         """
-        # Manually append EOS token to each caption
-        # This ensures captions end with [EOS] instead of BERT's default [SEP]
-        captions_with_eos = [f"{cap} [EOS]" for cap in captions]
-
-        # Encode WITHOUT automatic special token addition
-        # This prevents BERT from adding [CLS] and [SEP]
+        # Encode captions first WITHOUT special tokens
         encoded = self.tokenizer(
-            captions_with_eos,
-            padding='max_length',
+            captions,
+            padding=False,  # Don't pad yet
             truncation=True,
-            max_length=self.max_length,
+            max_length=self.max_length - 1,  # Leave room for EOS
             add_special_tokens=False,  # Don't add [CLS] and [SEP]
             return_tensors='pt'
         )
+
+        # Manually append EOS token ID to each sequence
+        # This ensures captions end with actual [EOS] token, not tokenized text
+        input_ids = encoded['input_ids']
+        batch_size = input_ids.shape[0]
+
+        # Append EOS token to each sequence
+        eos_tokens = torch.full((batch_size, 1), self.eos_token_id, dtype=torch.long)
+        input_ids = torch.cat([input_ids, eos_tokens], dim=1)
+
+        # Now pad to max_length
+        seq_len = input_ids.shape[1]
+        if seq_len < self.max_length:
+            padding = torch.full(
+                (batch_size, self.max_length - seq_len),
+                self.pad_token_id,
+                dtype=torch.long
+            )
+            input_ids = torch.cat([input_ids, padding], dim=1)
+
+        # Create attention mask (1 for real tokens, 0 for padding)
+        attention_mask = (input_ids != self.pad_token_id).long()
+
+        encoded = {
+            'input_ids': input_ids,
+            'attention_mask': attention_mask
+        }
 
         if device is not None:
             encoded = {k: v.to(device) for k, v in encoded.items()}
