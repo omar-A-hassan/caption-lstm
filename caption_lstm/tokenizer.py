@@ -45,36 +45,45 @@ class CaptionTokenizer:
             to ensure proper sequence termination during generation.
         """
         # Encode captions first WITHOUT special tokens
+        # IMPORTANT: Use return_tensors=None to keep as lists since sequences have different lengths
         encoded = self.tokenizer(
             captions,
             padding=False,  # Don't pad yet
             truncation=True,
             max_length=self.max_length - 1,  # Leave room for EOS
             add_special_tokens=False,  # Don't add [CLS] and [SEP]
-            return_tensors='pt'
+            return_tensors=None  # Keep as lists until after padding
         )
 
-        # Manually append EOS token ID to each sequence
+        # Manually append EOS token ID to each sequence and pad
         # This ensures captions end with actual [EOS] token, not tokenized text
-        input_ids = encoded['input_ids']
-        batch_size = input_ids.shape[0]
-
-        # Append EOS token to each sequence
-        eos_tokens = torch.full((batch_size, 1), self.eos_token_id, dtype=torch.long)
-        input_ids = torch.cat([input_ids, eos_tokens], dim=1)
-
-        # Now pad to max_length
-        seq_len = input_ids.shape[1]
-        if seq_len < self.max_length:
-            padding = torch.full(
-                (batch_size, self.max_length - seq_len),
-                self.pad_token_id,
-                dtype=torch.long
-            )
-            input_ids = torch.cat([input_ids, padding], dim=1)
-
-        # Create attention mask (1 for real tokens, 0 for padding)
-        attention_mask = (input_ids != self.pad_token_id).long()
+        input_ids_list = encoded['input_ids']
+        batch_size = len(input_ids_list)
+        
+        padded_input_ids = []
+        attention_masks = []
+        
+        for ids in input_ids_list:
+            # Add EOS token
+            ids_with_eos = ids + [self.eos_token_id]
+            
+            # Pad to max_length
+            seq_len = len(ids_with_eos)
+            if seq_len < self.max_length:
+                padding_length = self.max_length - seq_len
+                padded_ids = ids_with_eos + [self.pad_token_id] * padding_length
+                attention_mask = [1] * seq_len + [0] * padding_length
+            else:
+                # Truncate if needed (shouldn't happen with proper max_length)
+                padded_ids = ids_with_eos[:self.max_length]
+                attention_mask = [1] * self.max_length
+            
+            padded_input_ids.append(padded_ids)
+            attention_masks.append(attention_mask)
+        
+        # Now convert to tensors (all sequences have same length)
+        input_ids = torch.tensor(padded_input_ids, dtype=torch.long)
+        attention_mask = torch.tensor(attention_masks, dtype=torch.long)
 
         encoded = {
             'input_ids': input_ids,
