@@ -5,6 +5,7 @@
 *.JPEG
 *.mp4
 *.pdf
+*.md
 scratch*
 
 yamls_run/
