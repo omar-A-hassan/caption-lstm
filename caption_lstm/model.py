@@ -23,7 +23,7 @@ class ViLCapConfig:
     encoder_pretrained_path: str = None
 
     # Decoder config
-    vocab_size: int = 30522  # BERT vocab size
+    vocab_size: int = 30523  # BERT vocab size (30522) + [EOS] token (1)
     decoder_dim: int = 512
     decoder_num_blocks: int = 3
     decoder_num_heads: int = 4
