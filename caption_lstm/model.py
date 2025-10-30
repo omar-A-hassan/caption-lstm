@@ -423,4 +423,7 @@ class ViLCap(nn.Module):
             decoder_embed,     # (B, S, D) text points
         )
 
+        # GeomLoss returns per-sample losses (B,), take mean to get scalar
+        loss = loss.mean()
+
         return loss * self.alignment_loss_weight
