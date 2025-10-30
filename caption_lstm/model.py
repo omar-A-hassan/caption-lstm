@@ -405,6 +405,11 @@ class ViLCap(nn.Module):
         text_mask = attention_mask.float()
         text_weights = text_mask / text_mask.sum(dim=-1, keepdim=True).clamp_min(1e-6)
 
+        # Match expected dimensionality (B, N, 1)
+        visual_weights = visual_weights.unsqueeze(-1)
+        text_weights = text_weights.unsqueeze(-1)
+        decoder_hidden = decoder_hidden * text_mask.unsqueeze(-1)
+
         loss = self.alignment_loss_fn(
             visual_embed,
             decoder_hidden,
