@@ -407,20 +407,20 @@ class ViLCap(nn.Module):
 
         batch_size, num_patches, _ = visual_embed.shape
 
-        # Uniform weights for visual tokens
-        visual_weights = visual_embed.new_full((batch_size, num_patches, 1), 1.0 / num_patches)
+        # Uniform weights for visual tokens (shape: B, N)
+        visual_weights = visual_embed.new_full((batch_size, num_patches), 1.0 / num_patches)
 
-        # Attention mask -> weights (avoid division by zero)
+        # Attention mask -> weights (avoid division by zero, shape: B, S)
         text_mask = attention_mask.float()
         text_weights = text_mask / text_mask.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-        text_weights = text_weights.unsqueeze(-1)
+        # Do NOT unsqueeze - GeomLoss expects 2D weights
         decoder_embed = decoder_embed * text_mask.unsqueeze(-1)
 
         loss = self.alignment_loss_fn(
-            visual_embed,
-            decoder_embed,
-            visual_weights,
-            text_weights,
+            visual_weights,    # (B, N) weights for visual
+            visual_embed,      # (B, N, D) visual points
+            text_weights,      # (B, S) weights for text
+            decoder_embed,     # (B, S, D) text points
         )
 
         return loss * self.alignment_loss_weight
