@@ -72,7 +72,7 @@ class CaptionDecoder(nn.Module):
 
         self.reset_parameters()
 
-    def forward(self, token_ids, visual_context=None):
+    def forward(self, token_ids, visual_context=None, return_hidden_states=False):
         """
         Forward pass for decoder.
 
@@ -82,9 +82,13 @@ class CaptionDecoder(nn.Module):
                 - (batch_size, embedding_dim) OR
                 - (batch_size, N, embedding_dim)  # will be mean-pooled to (B, D)
               If provided, it is added to ALL token embeddings at every timestep.
+            return_hidden_states: Whether to return the hidden states prior to the
+                output projection for downstream objectives (e.g., alignment losses).
 
         Returns:
-            logits: (batch_size, seq_len, vocab_size)
+            dict with:
+                logits: (batch_size, seq_len, vocab_size)
+                hidden_states (optional): (batch_size, seq_len, embedding_dim)
         """
         batch_size, seq_len = token_ids.shape
 
@@ -124,9 +128,16 @@ class CaptionDecoder(nn.Module):
             x = x + dropout(block(x, block_idx=i))
 
         # Project to vocabulary
-        logits = self.output_proj(x)
+        decoder_hidden = x
+        logits = self.output_proj(decoder_hidden)
 
-        return logits
+        if return_hidden_states:
+            return {
+                "logits": logits,
+                "hidden_states": decoder_hidden,
+            }
+
+        return {"logits": logits}
 
     def generate(self, bos_token_id, eos_token_id, pad_token_id,
                  visual_context=None, max_length=50, temperature=1.0, top_k=None):
@@ -156,7 +167,8 @@ class CaptionDecoder(nn.Module):
 
         for _ in range(max_length - 1):
             # Forward pass
-            logits = self.forward(generated, visual_context=visual_context)
+            decoder_output = self.forward(generated, visual_context=visual_context)
+            logits = decoder_output["logits"]
 
             # Get logits for next token (last position)
             next_token_logits = logits[:, -1, :] / temperature

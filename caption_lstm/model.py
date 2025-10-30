@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from dataclasses import dataclass
+from typing import Dict, Optional
 from transformers import BertModel
 
 from vision_lstm.vision_lstm import VisionLSTM
@@ -32,6 +34,12 @@ class ViLCapConfig:
 
     # Tokenizer
     tokenizer_model: str = "bert-base-uncased"
+
+    # Alignment loss (optional)
+    alignment_loss_weight: float = 0.0
+    alignment_loss_type: str = "geom"
+    alignment_loss_kwargs: Optional[Dict] = None
+    alignment_normalize: bool = True
 
 
 class ViLCap(nn.Module):
@@ -80,6 +88,34 @@ class ViLCap(nn.Module):
             visual_dim=visual_dim,
             decoder_dim=config.decoder_dim
         )
+
+        # Projection for alignment (maps ViL tokens to decoder dim)
+        self.visual_align_proj = nn.Linear(
+            config.encoder_dim,
+            config.decoder_dim,
+        )
+
+        self.alignment_loss_weight = config.alignment_loss_weight
+        self.alignment_loss_fn = None
+        if self.alignment_loss_weight > 0.0:
+            if config.alignment_loss_type.lower() != "geom":
+                raise ValueError(
+                    f"Unsupported alignment loss type: {config.alignment_loss_type}. "
+                    "Only 'geom' is currently implemented."
+                )
+            try:
+                from geomloss import SamplesLoss
+            except ImportError as exc:
+                raise ImportError(
+                    "geomloss is required for alignment_loss_weight > 0. "
+                    "Install it via `pip install geomloss`."
+                ) from exc
+
+            default_kwargs = dict(loss="sinkhorn", p=2, blur=0.05, scaling=0.9, backend="auto")
+            loss_kwargs = default_kwargs
+            if config.alignment_loss_kwargs is not None:
+                loss_kwargs = {**default_kwargs, **config.alignment_loss_kwargs}
+            self.alignment_loss_fn = SamplesLoss(**loss_kwargs)
 
         # Caption decoder
         decoder_config = CaptionDecoderConfig(
@@ -211,32 +247,37 @@ class ViLCap(nn.Module):
             print(f"⚠ Warning: Could not load pretrained embeddings: {e}")
             print("  Continuing with random initialization...")
 
-    def encode_image(self, images):
+    def encode_image(self, images, return_tokens: bool = False):
         """
         Encode images to visual features.
 
         Args:
             images: (batch_size, 3, H, W)
+            return_tokens: Whether to also return patch/token-level features
 
         Returns:
             visual_features: (batch_size, encoder_dim) or (batch_size, N, encoder_dim)
+            (optionally) encoder_tokens: (batch_size, N, encoder_dim)
         """
         # Encoder returns (B, N, D) where N = num_patches
         features = self.encoder(images)
 
-        # Apply pooling if specified
-        if self.encoder_pooling == "bilateral_avg":
-            # Average of first and last token
-            features = (features[:, 0] + features[:, -1]) / 2  # (B, D)
-        elif self.encoder_pooling == "bilateral_concat":
-            # Concatenate first and last token
-            features = torch.cat([features[:, 0], features[:, -1]], dim=-1)  # (B, 2*D)
-        elif self.encoder_pooling == "mean":
-            # Mean pool all tokens
-            features = features.mean(dim=1)  # (B, D)
-        # else: no pooling, return (B, N, D)
+        pooled = self._apply_pooling(features)
 
-        return features
+        if return_tokens:
+            return pooled, features
+        return pooled
+
+    def _apply_pooling(self, token_features: torch.Tensor) -> torch.Tensor:
+        """Apply the configured pooling on encoder token features."""
+        if self.encoder_pooling == "bilateral_avg":
+            return (token_features[:, 0] + token_features[:, -1]) / 2
+        if self.encoder_pooling == "bilateral_concat":
+            return torch.cat([token_features[:, 0], token_features[:, -1]], dim=-1)
+        if self.encoder_pooling == "mean":
+            return token_features.mean(dim=1)
+        # No pooling -> return token grid
+        return token_features
 
     def forward(self, images, captions=None, mode='train'):
         """
@@ -252,7 +293,7 @@ class ViLCap(nn.Module):
             If mode='generate': generated caption strings
         """
         # Encode image
-        visual_features = self.encode_image(images)  # (B, D_enc)
+        visual_features, encoder_tokens = self.encode_image(images, return_tokens=True)  # pooled + tokens
 
         # Fuse visual features to decoder space
         visual_context = self.fusion(visual_features)  # (B, D_dec)
@@ -267,16 +308,29 @@ class ViLCap(nn.Module):
             )
 
             # Decode with teacher forcing
-            logits = self.decoder(
+            decoder_output = self.decoder(
                 tokenized['decoder_input_ids'],
-                visual_context=visual_context
+                visual_context=visual_context,
+                return_hidden_states=self.alignment_loss_weight > 0.0,
             )
+            logits = decoder_output["logits"]
+            hidden_states = decoder_output.get("hidden_states")
 
-            return {
+            output = {
                 'logits': logits,
                 'target_ids': tokenized['target_ids'],
                 'attention_mask': tokenized['attention_mask']
             }
+
+            if self.alignment_loss_weight > 0.0 and hidden_states is not None:
+                alignment_loss = self.compute_alignment_loss(
+                    encoder_tokens=encoder_tokens,
+                    decoder_hidden=hidden_states,
+                    attention_mask=tokenized['attention_mask'],
+                )
+                output['alignment_loss'] = alignment_loss
+
+            return output
 
         elif mode == 'generate':
             # Autoregressive generation
@@ -329,3 +383,33 @@ class ViLCap(nn.Module):
             captions = self.tokenizer.decode(generated_ids)
 
         return captions
+
+    def compute_alignment_loss(self, encoder_tokens, decoder_hidden, attention_mask):
+        """Compute visual-linguistic alignment loss using geomloss."""
+        if self.alignment_loss_fn is None:
+            raise RuntimeError("Alignment loss requested but alignment_loss_fn is not initialized.")
+
+        # Project encoder tokens into decoder space
+        visual_embed = self.visual_align_proj(encoder_tokens)  # (B, N, D_dec)
+
+        if self.config.alignment_normalize:
+            visual_embed = F.normalize(visual_embed, dim=-1)
+            decoder_hidden = F.normalize(decoder_hidden, dim=-1)
+
+        batch_size, num_patches, _ = visual_embed.shape
+
+        # Uniform weights for visual tokens
+        visual_weights = visual_embed.new_full((batch_size, num_patches), 1.0 / num_patches)
+
+        # Attention mask -> weights (avoid division by zero)
+        text_mask = attention_mask.float()
+        text_weights = text_mask / text_mask.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+
+        loss = self.alignment_loss_fn(
+            visual_embed,
+            decoder_hidden,
+            visual_weights,
+            text_weights,
+        )
+
+        return loss * self.alignment_loss_weight
