@@ -40,6 +40,7 @@ class ViLCapConfig:
     alignment_loss_type: str = "geom"
     alignment_loss_kwargs: Optional[Dict] = None
     alignment_normalize: bool = True
+    alignment_proj_dim: Optional[int] = None
 
 
 class ViLCap(nn.Module):
@@ -89,14 +90,18 @@ class ViLCap(nn.Module):
             decoder_dim=config.decoder_dim
         )
 
-        # Projection for alignment (maps ViL tokens to decoder dim)
+        # Projection heads for alignment objective
+        alignment_dim = config.alignment_proj_dim or config.decoder_dim
+        self.alignment_dim = alignment_dim
         self.visual_align_proj = nn.Linear(
             config.encoder_dim,
-            config.decoder_dim,
+            alignment_dim,
         )
-
-        # Optional projection for decoder hidden states (lazy-init)
-        self.decoder_align_proj: Optional[nn.Module] = None
+        self.decoder_align_proj = nn.Linear(
+            config.decoder_dim,
+            alignment_dim,
+            bias=False,
+        )
 
         self.alignment_loss_weight = config.alignment_loss_weight
         self.alignment_loss_fn = None
@@ -392,27 +397,13 @@ class ViLCap(nn.Module):
         if self.alignment_loss_fn is None:
             raise RuntimeError("Alignment loss requested but alignment_loss_fn is not initialized.")
 
-        # Project encoder tokens into decoder space
-        visual_embed = self.visual_align_proj(encoder_tokens)  # (B, N, D_dec)
+        # Project encoder and decoder tokens into shared alignment space
+        visual_embed = self.visual_align_proj(encoder_tokens)  # (B, N, alignment_dim)
+        decoder_embed = self.decoder_align_proj(decoder_hidden)  # (B, S, alignment_dim)
 
         if self.config.alignment_normalize:
             visual_embed = F.normalize(visual_embed, dim=-1)
-            decoder_hidden = F.normalize(decoder_hidden, dim=-1)
-
-        if decoder_hidden.size(-1) != visual_embed.size(-1):
-            if (
-                self.decoder_align_proj is None
-                or self.decoder_align_proj.in_features != decoder_hidden.size(-1)
-                or self.decoder_align_proj.out_features != visual_embed.size(-1)
-            ):
-                self.decoder_align_proj = nn.Linear(
-                    decoder_hidden.size(-1),
-                    visual_embed.size(-1),
-                    bias=False,
-                ).to(decoder_hidden.device)
-            decoder_hidden = self.decoder_align_proj(decoder_hidden)
-            if self.config.alignment_normalize:
-                decoder_hidden = F.normalize(decoder_hidden, dim=-1)
+            decoder_embed = F.normalize(decoder_embed, dim=-1)
 
         batch_size, num_patches, _ = visual_embed.shape
 
@@ -422,15 +413,11 @@ class ViLCap(nn.Module):
         # Attention mask -> weights (avoid division by zero)
         text_mask = attention_mask.float()
         text_weights = text_mask / text_mask.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-
-        # Match expected dimensionality (B, N, 1)
-        visual_weights = visual_weights.unsqueeze(-1)
-        text_weights = text_weights.unsqueeze(-1)
-        decoder_hidden = decoder_hidden * text_mask.unsqueeze(-1)
+        decoder_embed = decoder_embed * text_mask.unsqueeze(-1)
 
         loss = self.alignment_loss_fn(
             visual_embed,
-            decoder_hidden,
+            decoder_embed,
             visual_weights,
             text_weights,
         )
