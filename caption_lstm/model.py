@@ -95,6 +95,9 @@ class ViLCap(nn.Module):
             config.decoder_dim,
         )
 
+        # Optional projection for decoder hidden states (lazy-init)
+        self.decoder_align_proj: Optional[nn.Module] = None
+
         self.alignment_loss_weight = config.alignment_loss_weight
         self.alignment_loss_fn = None
         if self.alignment_loss_weight > 0.0:
@@ -395,6 +398,21 @@ class ViLCap(nn.Module):
         if self.config.alignment_normalize:
             visual_embed = F.normalize(visual_embed, dim=-1)
             decoder_hidden = F.normalize(decoder_hidden, dim=-1)
+
+        if decoder_hidden.size(-1) != visual_embed.size(-1):
+            if (
+                self.decoder_align_proj is None
+                or self.decoder_align_proj.in_features != decoder_hidden.size(-1)
+                or self.decoder_align_proj.out_features != visual_embed.size(-1)
+            ):
+                self.decoder_align_proj = nn.Linear(
+                    decoder_hidden.size(-1),
+                    visual_embed.size(-1),
+                    bias=False,
+                ).to(decoder_hidden.device)
+            decoder_hidden = self.decoder_align_proj(decoder_hidden)
+            if self.config.alignment_normalize:
+                decoder_hidden = F.normalize(decoder_hidden, dim=-1)
 
         batch_size, num_patches, _ = visual_embed.shape
 
