@@ -112,32 +112,29 @@ class MBRCaptionDecoder:
         if source_text is None:
             source_text = [""] * batch_size
 
-        # Encode images once
+        # Encode images once and generate FiLM parameters
         visual_features = self.model.encode_image(images)  # (B, D_enc) or (B, N, D_enc)
-        visual_context = self.model.fusion(visual_features)  # (B, D_dec) or (B, N, D_dec)
+        gamma, beta = self.model.fusion(visual_features)  # (B, D_dec), (B, D_dec)
 
         # Generate candidates and perform MBR for each image
         selected_captions = []
 
         for b in range(batch_size):
-            # Get visual context for this image
-            visual_ctx_single = visual_context[b:b+1]  # (1, D) or (1, N, D)
+            # Get FiLM parameters for this image
+            gamma_single = gamma[b:b+1]  # (1, D_dec)
+            beta_single = beta[b:b+1]    # (1, D_dec)
 
-            # Expand visual context for N candidates
-            # Handle both 2D (B, D) and 3D (B, N, D) cases
-            if visual_ctx_single.dim() == 2:
-                # (1, D) -> (num_candidates, D)
-                visual_ctx_batch = visual_ctx_single.expand(self.num_candidates, -1)
-            else:
-                # (1, N, D) -> (num_candidates, N, D)
-                visual_ctx_batch = visual_ctx_single.expand(self.num_candidates, -1, -1)
+            # Expand FiLM parameters for N candidates
+            gamma_batch = gamma_single.expand(self.num_candidates, -1)  # (num_candidates, D_dec)
+            beta_batch = beta_single.expand(self.num_candidates, -1)    # (num_candidates, D_dec)
 
-            # Generate N candidates via sampling
+            # Generate N candidates via sampling with FiLM conditioning
             generated_ids = self.model.decoder.generate(
                 bos_token_id=self.model.tokenizer.bos_token_id,
                 eos_token_id=self.model.tokenizer.eos_token_id,
                 pad_token_id=self.model.tokenizer.pad_token_id,
-                visual_context=visual_ctx_batch,
+                film_gamma=gamma_batch,
+                film_beta=beta_batch,
                 max_length=self.model.config.max_caption_length,
                 temperature=self.temperature,
                 top_k=self.top_k,
