@@ -33,6 +33,12 @@ class ViLCapConfig:
     # Tokenizer
     tokenizer_model: str = "bert-base-uncased"
 
+    # CLIP contrastive learning
+    use_clip: bool = False
+    clip_dim: int = 512
+    clip_temperature_init: float = 0.07
+    clip_learnable_temperature: bool = True
+
 
 class ViLCap(nn.Module):
     """
@@ -112,6 +118,16 @@ class ViLCap(nn.Module):
 
         # Initialize decoder embeddings with pretrained BERT embeddings
         self._init_pretrained_embeddings()
+
+        # CLIP projection heads (optional)
+        if config.use_clip:
+            from caption_lstm.clip_loss import CLIPProjectionHeads
+            self.clip_heads = CLIPProjectionHeads(
+                image_dim=visual_dim,
+                text_dim=config.decoder_dim,
+                embed_dim=config.clip_dim
+            )
+            print(f"✓ CLIP projection heads initialized (embed_dim={config.clip_dim})")
 
     def load_encoder_weights(self, path):
         """Load pretrained encoder weights."""
@@ -267,17 +283,40 @@ class ViLCap(nn.Module):
             )
 
             # Decode with teacher forcing and FiLM conditioning
-            logits = self.decoder(
+            # Request hidden states if CLIP is enabled
+            use_clip = hasattr(self, 'clip_heads')
+            decoder_output = self.decoder(
                 tokenized['decoder_input_ids'],
                 film_gamma=gamma,
-                film_beta=beta
+                film_beta=beta,
+                return_hidden_states=use_clip
             )
 
-            return {
+            # Extract logits (handle both dict and tensor outputs)
+            if isinstance(decoder_output, dict):
+                logits = decoder_output['logits']
+                text_features = decoder_output.get('text_features', None)
+            else:
+                logits = decoder_output
+                text_features = None
+
+            # Prepare output
+            result = {
                 'logits': logits,
                 'target_ids': tokenized['target_ids'],
                 'attention_mask': tokenized['attention_mask']
             }
+
+            # Add CLIP embeddings if enabled
+            if use_clip and text_features is not None:
+                image_embed, text_embed = self.clip_heads(
+                    visual_features,
+                    text_features
+                )
+                result['image_embed'] = image_embed
+                result['text_embed'] = text_embed
+
+            return result
 
         elif mode == 'generate':
             # Autoregressive generation with FiLM conditioning

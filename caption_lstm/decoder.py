@@ -69,7 +69,7 @@ class CaptionDecoder(nn.Module):
 
         self.reset_parameters()
 
-    def forward(self, token_ids, film_gamma=None, film_beta=None):
+    def forward(self, token_ids, film_gamma=None, film_beta=None, return_hidden_states=False):
         """
         Forward pass for decoder with FiLM conditioning.
 
@@ -79,9 +79,12 @@ class CaptionDecoder(nn.Module):
                 If provided, applies feature-wise scaling before each block
             film_beta: FiLM shift parameters (batch_size, embedding_dim)
                 If provided, applies feature-wise shifting before each block
+            return_hidden_states: If True, returns dict with logits and text features
+                for CLIP contrastive learning
 
         Returns:
-            logits: (batch_size, seq_len, vocab_size)
+            If return_hidden_states=False: logits (batch_size, seq_len, vocab_size)
+            If return_hidden_states=True: dict with 'logits' and 'text_features'
         """
         batch_size, seq_len = token_ids.shape
 
@@ -105,6 +108,12 @@ class CaptionDecoder(nn.Module):
 
         # Project to vocabulary
         logits = self.output_proj(x)
+
+        # Optionally return hidden states for CLIP
+        if return_hidden_states:
+            # Pool hidden states across sequence dimension (mean pooling)
+            text_features = x.mean(dim=1)  # (B, S, D) → (B, D)
+            return {'logits': logits, 'text_features': text_features}
 
         return logits
 
