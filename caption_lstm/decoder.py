@@ -67,28 +67,21 @@ class CaptionDecoder(nn.Module):
         # Output projection to vocabulary
         self.output_proj = nn.Linear(config.embedding_dim, config.vocab_size)
 
-        # Lazy-initialized projection for visual context when dims mismatch
-        self._visual_proj = None
-
         self.reset_parameters()
 
-    def forward(self, token_ids, visual_context=None, return_hidden_states=False):
+    def forward(self, token_ids, film_gamma=None, film_beta=None):
         """
-        Forward pass for decoder.
+        Forward pass for decoder with FiLM conditioning.
 
         Args:
             token_ids: Token IDs (batch_size, seq_len)
-            visual_context:
-                - (batch_size, embedding_dim) OR
-                - (batch_size, N, embedding_dim)  # will be mean-pooled to (B, D)
-              If provided, it is added to ALL token embeddings at every timestep.
-            return_hidden_states: Whether to return the hidden states prior to the
-                output projection for downstream objectives (e.g., alignment losses).
+            film_gamma: FiLM scale parameters (batch_size, embedding_dim)
+                If provided, applies feature-wise scaling before each block
+            film_beta: FiLM shift parameters (batch_size, embedding_dim)
+                If provided, applies feature-wise shifting before each block
 
         Returns:
-            dict with:
-                logits: (batch_size, seq_len, vocab_size)
-                hidden_states (optional): (batch_size, seq_len, embedding_dim)
+            logits: (batch_size, seq_len, vocab_size)
         """
         batch_size, seq_len = token_ids.shape
 
@@ -98,59 +91,34 @@ class CaptionDecoder(nn.Module):
         # Add positional embedding
         x = x + self.pos_embedding[:, :seq_len, :]
 
-        # Inject visual context at ALL timesteps (matching BiLSTM paper approach)
-        if visual_context is not None:
-            # Accept either (B, D_enc) or (B, N, D_enc)
-            if visual_context.dim() == 3:
-                # Mean-pool tokens -> (B, D_enc)
-                visual_context = visual_context.mean(dim=1)
-
-            # Now visual_context is (B, D_enc)
-            dec_d = x.size(-1)
-            enc_d = visual_context.size(-1)
-
-            # Project encoder dim to decoder dim if needed (lazy-create once)
-            if enc_d != dec_d:
-                if (self._visual_proj is None or
-                    self._visual_proj.in_features != enc_d or
-                    self._visual_proj.out_features != dec_d):
-                    self._visual_proj = nn.Linear(enc_d, dec_d).to(visual_context.device)
-                visual_context = self._visual_proj(visual_context)
-
-            # Broadcast visual context to all timesteps and add
-            # visual_context: (B, D) -> (B, 1, D) -> (B, S, D)
-            visual_broadcast = visual_context.unsqueeze(1).expand(-1, seq_len, -1)
-            x = x + visual_broadcast
-
-        # Pass through mLSTM blocks
+        # Pass through mLSTM blocks with FiLM conditioning
         for i, (block, dropout) in enumerate(zip(self.blocks, self.dropout_layers)):
+            # Apply FiLM conditioning BEFORE block (as in FiLM paper)
+            if film_gamma is not None and film_beta is not None:
+                # gamma, beta: (B, D) → expand to (B, 1, D) → broadcast to (B, S, D)
+                gamma = film_gamma.unsqueeze(1)  # (B, 1, D)
+                beta = film_beta.unsqueeze(1)    # (B, 1, D)
+                x = gamma * x + beta  # Feature-wise linear modulation
+
             # Residual connection
             x = x + dropout(block(x, block_idx=i))
 
         # Project to vocabulary
-        decoder_hidden = x
-        logits = self.output_proj(decoder_hidden)
+        logits = self.output_proj(x)
 
-        if return_hidden_states:
-            return {
-                "logits": logits,
-                "hidden_states": decoder_hidden,
-            }
-
-        return {"logits": logits}
+        return logits
 
     def generate(self, bos_token_id, eos_token_id, pad_token_id,
-                 visual_context=None, max_length=50, temperature=1.0, top_k=None):
+                 film_gamma=None, film_beta=None, max_length=50, temperature=1.0, top_k=None):
         """
-        Autoregressive generation.
+        Autoregressive generation with FiLM conditioning.
 
         Args:
             bos_token_id: Beginning of sequence token ID
             eos_token_id: End of sequence token ID
             pad_token_id: Padding token ID
-            visual_context:
-                - (batch_size, embedding_dim) OR
-                - (batch_size, N, embedding_dim)  # will be mean-pooled internally
+            film_gamma: FiLM scale parameters (batch_size, embedding_dim)
+            film_beta: FiLM shift parameters (batch_size, embedding_dim)
             max_length: Maximum generation length
             temperature: Sampling temperature
             top_k: Top-k sampling parameter
@@ -158,17 +126,16 @@ class CaptionDecoder(nn.Module):
         Returns:
             generated_ids: (batch_size, max_length)
         """
-        batch_size = visual_context.shape[0] if visual_context is not None else 1
-        device = visual_context.device if visual_context is not None else next(self.parameters()).device
+        batch_size = film_gamma.shape[0] if film_gamma is not None else 1
+        device = film_gamma.device if film_gamma is not None else next(self.parameters()).device
 
         # Start with BOS token
         generated = torch.full((batch_size, 1), bos_token_id, dtype=torch.long, device=device)
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
         for _ in range(max_length - 1):
-            # Forward pass
-            decoder_output = self.forward(generated, visual_context=visual_context)
-            logits = decoder_output["logits"]
+            # Forward pass with FiLM conditioning
+            logits = self.forward(generated, film_gamma=film_gamma, film_beta=film_beta)
 
             # Get logits for next token (last position)
             next_token_logits = logits[:, -1, :] / temperature
