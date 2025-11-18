@@ -138,8 +138,8 @@ class CLIPContrastiveLoss(nn.Module):
         return loss
 
     def get_temperature(self):
-        """Get current temperature value."""
-        return self.logit_scale.exp().item()
+        """Get current temperature value (tau = 1 / exp(logit_scale))."""
+        return (1.0 / self.logit_scale.exp()).item()
 
     def get_similarity_matrix(self, image_embed, text_embed):
         """
