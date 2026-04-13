@@ -308,13 +308,15 @@ class ViLDiffusionVLM(nn.Module):
     # Training forward
     # ------------------------------------------------------------------
 
-    def forward(self, images: torch.Tensor, captions: list[str]) -> dict:
+    def forward(self, images: torch.Tensor, captions) -> dict:
         """
         Training step.
 
         Args:
             images:   (B, 3, H, W)
-            captions: list of B caption strings
+            captions: either
+                - list[str] of length B
+                - torch.LongTensor of shape (B, L) with token IDs
 
         Returns:
             dict with 'loss' (scalar) and diagnostic keys.
@@ -322,16 +324,22 @@ class ViLDiffusionVLM(nn.Module):
         device = images.device
         B = images.shape[0]
 
-        # Tokenise captions
-        encoded = self.tokenizer(
-            captions,
-            padding='max_length',
-            truncation=True,
-            max_length=self.config.max_text_length,
-            return_tensors='pt',
-            add_special_tokens=True,
-        )
-        x0 = encoded['input_ids'].to(device)             # (B, L) clean token ids
+        # Tokenise captions unless already provided as token IDs.
+        if torch.is_tensor(captions):
+            x0 = captions.to(device, dtype=torch.long)
+        else:
+            encoded = self.tokenizer(
+                captions,
+                padding='max_length',
+                truncation=True,
+                max_length=self.config.max_text_length,
+                return_tensors='pt',
+                add_special_tokens=True,
+            )
+            x0 = encoded['input_ids'].to(device)         # (B, L) clean token ids
+
+        # Keep batch-size bookkeeping aligned even when caption tensors are passed.
+        B = x0.shape[0]
 
         # Encode image
         image_tokens = self.encode_image(images)          # (B, N, D)

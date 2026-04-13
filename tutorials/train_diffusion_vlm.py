@@ -337,7 +337,21 @@ def train(args):
 
         # Mixed-precision forward
         with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
-            out = model(images, captions)
+            if use_dataparallel:
+                # DataParallel does not split Python lists reliably by batch.
+                # Tokenize to a tensor so captions are scattered with images.
+                encoded = base_model.tokenizer(
+                    captions,
+                    padding='max_length',
+                    truncation=True,
+                    max_length=base_model.config.max_text_length,
+                    return_tensors='pt',
+                    add_special_tokens=True,
+                )
+                caption_ids = encoded['input_ids'].to(device, non_blocking=True)
+                out = model(images, caption_ids)
+            else:
+                out = model(images, captions)
             loss = out['loss'] / args.grad_accum
 
         scaler.scale(loss).backward()
