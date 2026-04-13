@@ -364,13 +364,14 @@ class ViLDiffusionVLM(nn.Module):
         with torch.no_grad():
             n_masked = mask.float().sum()
             n_total = mask.numel()
-            pred_correct = (logits.argmax(-1) == x0)[mask].float().mean() if mask.any() else torch.tensor(0.0)
+            pred_correct = (logits.argmax(-1) == x0)[mask].float().mean() if mask.any() else torch.tensor(0.0, device=device)
 
         return {
             'loss': loss,
-            'mask_fraction': (n_masked / n_total).item(),
-            'masked_accuracy': pred_correct.item(),
-            'mean_t': t.mean().item(),
+            # Keep diagnostics as tensors so DataParallel can gather outputs.
+            'mask_fraction': (n_masked / n_total),
+            'masked_accuracy': pred_correct,
+            'mean_t': t.mean(),
         }
 
     # ------------------------------------------------------------------

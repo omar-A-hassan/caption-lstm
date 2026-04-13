@@ -352,7 +352,12 @@ def train(args):
                 out = model(images, caption_ids)
             else:
                 out = model(images, captions)
-            loss = out['loss'] / args.grad_accum
+
+            # DataParallel gathers replica outputs into vectors; reduce to scalar.
+            out_loss = out['loss']
+            if torch.is_tensor(out_loss) and out_loss.ndim > 0:
+                out_loss = out_loss.mean()
+            loss = out_loss / args.grad_accum
 
         scaler.scale(loss).backward()
         accum_loss += loss.item()
@@ -367,10 +372,18 @@ def train(args):
 
         # Logging
         if (step + 1) % log_every == 0:
+            mask_fraction = out['mask_fraction']
+            if torch.is_tensor(mask_fraction):
+                mask_fraction = mask_fraction.mean().item() if mask_fraction.ndim > 0 else mask_fraction.item()
+
+            masked_accuracy = out['masked_accuracy']
+            if torch.is_tensor(masked_accuracy):
+                masked_accuracy = masked_accuracy.mean().item() if masked_accuracy.ndim > 0 else masked_accuracy.item()
+
             pbar.set_postfix({
                 'loss': f"{accum_loss * args.grad_accum / log_every:.4f}",
-                'mask%': f"{out['mask_fraction']:.2f}",
-                'acc': f"{out['masked_accuracy']:.3f}",
+                'mask%': f"{mask_fraction:.2f}",
+                'acc': f"{masked_accuracy:.3f}",
                 'lr': f"{lr:.2e}",
             })
             accum_loss = 0.0
