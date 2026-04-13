@@ -17,6 +17,7 @@ For stage 2 (COCO fine-tune), pass --stage 2 --resume <checkpoint>.
 """
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -79,11 +80,45 @@ class CC3MDataset(Dataset):
         self.image_root = Path(image_root)
         self.transform = transform
         self.samples = []
-        with open(tsv_path) as f:
-            for line in f:
-                parts = line.strip().split('\t', 1)
-                if len(parts) == 2:
-                    self.samples.append(tuple(parts))
+        with open(tsv_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f, delimiter='\t')
+            first = next(reader, None)
+            if first is None:
+                return
+
+            # Handle optional header and either column order:
+            # - image<TAB>caption  (expected)
+            # - caption<TAB>image  (common in Kaggle mirrors)
+            has_header = False
+            image_idx, caption_idx = 0, 1
+            header_lower = [c.strip().lower() for c in first]
+            if len(header_lower) >= 2 and ("image" in header_lower[0] or "caption" in header_lower[0]):
+                has_header = True
+                if "image" in header_lower[0] and "caption" in header_lower[1]:
+                    image_idx, caption_idx = 0, 1
+                elif "caption" in header_lower[0] and "image" in header_lower[1]:
+                    image_idx, caption_idx = 1, 0
+
+            if not has_header and len(first) >= 2:
+                # Heuristic fallback for no-header TSV.
+                c0, c1 = first[0].strip().lower(), first[1].strip().lower()
+                if (c0.endswith((".jpg", ".jpeg", ".png", ".webp")) and not c1.endswith((".jpg", ".jpeg", ".png", ".webp"))):
+                    image_idx, caption_idx = 0, 1
+                elif (c1.endswith((".jpg", ".jpeg", ".png", ".webp")) and not c0.endswith((".jpg", ".jpeg", ".png", ".webp"))):
+                    image_idx, caption_idx = 1, 0
+
+            def _append_row(parts):
+                if len(parts) < 2:
+                    return
+                fname = parts[image_idx].strip()
+                caption = parts[caption_idx].strip()
+                if fname and caption:
+                    self.samples.append((fname, caption))
+
+            if not has_header:
+                _append_row(first)
+            for parts in reader:
+                _append_row(parts)
 
     def __len__(self):
         return len(self.samples)
@@ -185,6 +220,8 @@ def set_lr(optimizer, lr):
 def train(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
+    n_gpus = torch.cuda.device_count() if device.type == 'cuda' else 0
+    print(f"Visible GPUs: {n_gpus}")
 
     # ------------------------------------------------------------------
     # Model
@@ -200,19 +237,26 @@ def train(args):
         guidance_scale=2.0,
     )
     model = ViLDiffusionVLM(config).to(device)
-    print(f"Trainable parameters: {model.num_parameters() / 1e6:.1f}M")
+
+    use_dataparallel = device.type == 'cuda' and n_gpus > 1
+    if use_dataparallel:
+        print(f"Using torch.nn.DataParallel across {n_gpus} GPUs")
+        model = torch.nn.DataParallel(model)
+
+    base_model = model.module if hasattr(model, 'module') else model
+    print(f"Trainable parameters: {base_model.num_parameters() / 1e6:.1f}M")
 
     # Resume from checkpoint if given
     start_step = 0
     if args.resume and Path(args.resume).exists():
         ckpt = torch.load(args.resume, map_location=device)
-        model.load_state_dict(ckpt['model'])
+        base_model.load_state_dict(ckpt['model'])
         start_step = ckpt.get('step', 0)
         print(f"Resumed from {args.resume} at step {start_step}")
 
     # If stage 2, unfreeze encoder
     if args.stage == 2:
-        model.unfreeze_encoder()
+        base_model.unfreeze_encoder()
 
     # ------------------------------------------------------------------
     # Data
@@ -248,7 +292,7 @@ def train(args):
     # ------------------------------------------------------------------
     # Optimiser, scheduler, scaler
     # ------------------------------------------------------------------
-    optimizer = build_optimizer(model, args.lr, args.weight_decay,
+    optimizer = build_optimizer(base_model, args.lr, args.weight_decay,
                                 encoder_unfrozen=(args.stage == 2))
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
     ema = EMA(model, decay=0.9999)
@@ -305,7 +349,7 @@ def train(args):
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-            ema.update(model)
+            ema.update(base_model)
 
         # Logging
         if (step + 1) % log_every == 0:
@@ -321,7 +365,7 @@ def train(args):
         if (step + 1) % args.save_every == 0:
             ckpt_path = output_dir / f"step_{step + 1}.pt"
             torch.save({
-                'model': model.state_dict(),
+                'model': base_model.state_dict(),
                 'ema': ema.shadow,
                 'optimizer': optimizer.state_dict(),
                 'step': step + 1,
@@ -336,7 +380,7 @@ def train(args):
                                              num_workers=0, shuffle=True)))
             val_images, val_gt = val_batch
             val_images = val_images.to(device)
-            generated = model.generate(val_images, num_steps=20)
+            generated = base_model.generate(val_images, num_steps=20)
             print("\n--- Validation samples ---")
             for gt, pred in zip(val_gt[:4], generated[:4]):
                 print(f"  GT  : {gt}")
@@ -348,7 +392,7 @@ def train(args):
 
     # Final checkpoint
     torch.save({
-        'model': model.state_dict(),
+        'model': base_model.state_dict(),
         'ema': ema.shadow,
         'step': total_steps,
         'config': config,
