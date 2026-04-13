@@ -295,7 +295,7 @@ def train(args):
     optimizer = build_optimizer(base_model, args.lr, args.weight_decay,
                                 encoder_unfrozen=(args.stage == 2))
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
-    ema = EMA(model, decay=0.9999)
+    ema = EMA(base_model, decay=0.9999)
 
     # Mark encoder group lr scale so set_lr can preserve the ratio
     if args.stage == 2:
