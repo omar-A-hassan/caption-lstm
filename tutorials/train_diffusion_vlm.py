@@ -50,6 +50,17 @@ class CocoCaptionsDataset(Dataset):
         self.root = Path(root)
         self.transform = transform
 
+        # COCO annotations store bare file names (e.g., 000000123.jpg).
+        # Images usually live under train2017/ or val2017/ subdirectories.
+        ann_name = Path(ann_file).name.lower()
+        if 'train' in ann_name and (self.root / 'train2017').exists():
+            self.image_root = self.root / 'train2017'
+        elif 'val' in ann_name and (self.root / 'val2017').exists():
+            self.image_root = self.root / 'val2017'
+        else:
+            # Fallback for layouts where files are directly under root.
+            self.image_root = self.root
+
         with open(ann_file) as f:
             data = json.load(f)
 
@@ -64,7 +75,7 @@ class CocoCaptionsDataset(Dataset):
 
     def __getitem__(self, idx):
         fname, caption = self.samples[idx]
-        img = Image.open(self.root / fname).convert('RGB')
+        img = Image.open(self.image_root / fname).convert('RGB')
         if self.transform:
             img = self.transform(img)
         return img, caption
